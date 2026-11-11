@@ -25,9 +25,9 @@ Generated from [`results/metrics.json`](results/metrics.json). All detectors use
 
 | Dataset | Model | Strict F1 (ch-mean / pooled) | Point-adj F1 (ch-mean / pooled) | Pooled precision / recall | ROC-AUC (ch-mean) | Events detected | Mean latency (steps) | False alarms / 1k pts |
 |---|---|---|---|---|---|---|---|---|
-| SMAP (55 ch) | LSTM-AE | 0.218 / 0.436 | 0.375 / 0.598 | 0.508 / 0.381 | 0.584 | 31/69 | 69.2 | 0.58 |
-| SMAP (55 ch) | Isolation Forest | 0.052 / 0.125 | 0.483 / 0.725 | 0.351 / 0.076 | 0.584 | 41/69 | 38.0 | 3.35 |
-| SMAP (55 ch) | \|x<sub>t</sub> − x<sub>t−1</sub>\| baseline | 0.163 / 0.241 | 0.784 / 0.867 | 0.481 / 0.160 | 0.536 | 56/69 | 68.5 | 3.57 |
+| SMAP (54 ch) | LSTM-AE | 0.204 / 0.424 | 0.365 / 0.590 | 0.497 / 0.370 | 0.577 | 30/68 | 70.1 | 0.58 |
+| SMAP (54 ch) | Isolation Forest | 0.051 / 0.126 | 0.473 / 0.717 | 0.342 / 0.077 | 0.578 | 40/68 | 38.2 | 3.38 |
+| SMAP (54 ch) | \|x<sub>t</sub> − x<sub>t−1</sub>\| baseline | 0.154 / 0.227 | 0.782 / 0.867 | 0.469 / 0.150 | 0.531 | 55/68 | 69.7 | 3.27 |
 | MSL (27 ch) | LSTM-AE | 0.162 / 0.191 | 0.338 / 0.331 | 0.145 / 0.278 | 0.648 | 19/36 | 73.2 | 1.06 |
 | MSL (27 ch) | Isolation Forest | 0.122 / 0.142 | 0.606 / 0.583 | 0.128 / 0.159 | 0.580 | 25/36 | 52.6 | 5.45 |
 | MSL (27 ch) | \|x<sub>t</sub> − x<sub>t−1</sub>\| baseline | 0.145 / 0.102 | 0.760 / 0.620 | 0.094 / 0.112 | 0.617 | 31/36 | 51.4 | 3.40 |
@@ -36,10 +36,10 @@ Generated from [`results/metrics.json`](results/metrics.json). All detectors use
 
 | Anomaly type | SMAP top-1 / top-3 (n) | MSL top-1 / top-3 (n) |
 |---|---|---|
-| Spike | 0.18 / 0.52 (67) | 0.15 / 0.37 (67) |
-| Level shift | 0.66 / 0.88 (67) | 0.52 / 0.69 (67) |
-| Gradual drift | 0.64 / 0.85 (66) | 0.47 / 0.74 (66) |
-| All | 0.49 / 0.75 (200) | 0.38 / 0.60 (200) |
+| Spike | 0.28 / 0.66 (67) | 0.15 / 0.37 (67) |
+| Level shift | 0.64 / 0.87 (67) | 0.52 / 0.69 (67) |
+| Gradual drift | 0.62 / 0.79 (66) | 0.47 / 0.74 (66) |
+| All | 0.52 / 0.77 (200) | 0.38 / 0.60 (200) |
 | Random chance | 0.04 / 0.12 | 0.02 / 0.05 |
 
 Reproduce (seeded, deterministic TF ops):
