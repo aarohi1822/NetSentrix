@@ -36,17 +36,17 @@ Generated from [`results/metrics.json`](results/metrics.json). All detectors use
 
 | Anomaly type | SMAP top-1 / top-3 (n) | MSL top-1 / top-3 (n) |
 |---|---|---|
-| Spike | 0.28 / 0.66 (67) | 0.15 / 0.37 (67) |
-| Level shift | 0.64 / 0.87 (67) | 0.52 / 0.69 (67) |
-| Gradual drift | 0.62 / 0.79 (66) | 0.47 / 0.74 (66) |
-| All | 0.52 / 0.77 (200) | 0.38 / 0.60 (200) |
+| Spike | 0.26 / 0.54 (334) | 0.18 / 0.37 (334) |
+| Level shift | 0.57 / 0.83 (333) | 0.41 / 0.68 (333) |
+| Gradual drift | 0.53 / 0.74 (333) | 0.44 / 0.68 (333) |
+| All | 0.45 / 0.70 (1000) | 0.34 / 0.58 (1000) |
 | Random chance | 0.04 / 0.12 | 0.02 / 0.05 |
 
 Reproduce (seeded, deterministic TF ops):
 
 ```bash
-python src/benchmark_smap.py --spacecraft SMAP --epochs 5 --batch-size 256 --window-size 60 --latent-dim 32 --threshold-method percentile --percentile 99.0 --k 3.0 --smoothing-window 5 --seed 42 --n-injections 200 --diff-columns telemetry
-python src/benchmark_smap.py --spacecraft MSL --epochs 5 --batch-size 256 --window-size 60 --latent-dim 32 --threshold-method percentile --percentile 99.0 --k 3.0 --smoothing-window 5 --seed 42 --n-injections 200 --diff-columns telemetry
+python src/benchmark_smap.py --spacecraft SMAP --epochs 5 --batch-size 256 --window-size 60 --latent-dim 32 --threshold-method percentile --percentile 99.0 --k 3.0 --smoothing-window 5 --seed 42 --n-injections 1000 --diff-columns telemetry
+python src/benchmark_smap.py --spacecraft MSL --epochs 5 --batch-size 256 --window-size 60 --latent-dim 32 --threshold-method percentile --percentile 99.0 --k 3.0 --smoothing-window 5 --seed 42 --n-injections 1000 --diff-columns telemetry
 python src/collect_results.py --input-dir data/processed/evaluation --update-readme
 ```
 <!-- RESULTS:END -->
@@ -58,7 +58,7 @@ python src/collect_results.py --input-dir data/processed/evaluation --update-rea
 Unlike typical anomaly detection notebooks, this is product-shaped and benchmarked end-to-end:
 
 - **Honest benchmark** — strict and point-adjusted F1, detection latency and false alarms per 1k points against Isolation Forest and a trivial baseline on NASA SMAP + MSL; seeded, deterministic, saved to [`results/metrics.json`](results/metrics.json)
-- **Root-cause sensor ranking** — every anomaly reports which input drove the reconstruction error; validated with 200 injected anomalies per dataset (spikes are the weak spot, see the attribution table)
+- **Root-cause sensor ranking** — every anomaly reports which input drove the reconstruction error; validated with 1,000 injected anomalies per dataset (spikes are the weak spot, see the attribution table)
 - **Live replay simulation** — streams CSV data row-by-row to demo real-time IoT monitoring without extra infrastructure
 - **Threshold lab** — compare trained, percentile, mean/std, and manual thresholds side-by-side with severity labels (Warning / Critical)
 - **No label leakage** — model is trained exclusively on `label=0` rows; the threshold is saved and reused for production inference
@@ -94,8 +94,8 @@ streamlit run app/app.py
 
 ```bash
 python src/download_nasa_data.py
-python src/benchmark_smap.py --spacecraft SMAP --epochs 5 --batch-size 256 --output-dir data/processed/evaluation
-python src/benchmark_smap.py --spacecraft MSL  --epochs 5 --batch-size 256 --output-dir data/processed/evaluation
+python src/benchmark_smap.py --spacecraft SMAP --epochs 5 --batch-size 256 --n-injections 1000 --output-dir data/processed/evaluation
+python src/benchmark_smap.py --spacecraft MSL  --epochs 5 --batch-size 256 --n-injections 1000 --output-dir data/processed/evaluation
 python src/collect_results.py --input-dir data/processed/evaluation --update-readme
 ```
 
