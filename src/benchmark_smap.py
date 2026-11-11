@@ -1,72 +1,77 @@
+"""Benchmark the LSTM autoencoder against baselines on NASA SMAP / MSL.
+
+Per channel, three detectors are evaluated on the same test split:
+
+* LSTM autoencoder (reconstruction error),
+* Isolation Forest,
+* a trivial first-difference baseline (``|x_t - x_{t-1}|`` on the telemetry column).
+
+All three use the same thresholding rule: smooth the scores, then threshold at a
+statistic (percentile or mean + k*std) of the smoothed *training* scores.
+
+Reported metrics (see ``metrics.py`` for exact definitions): strict point-wise and
+point-adjusted precision / recall / F1 as per-channel mean and pooled over all
+points, ROC-AUC, mean detection latency and false alarms per 1,000 points.
+
+Root-cause attribution is validated by injecting synthetic anomalies (spike,
+level shift, gradual drift) into random columns / timesteps of the test data and
+checking whether the injected column ranks top-1 / top-3 by per-feature
+reconstruction error (see ``injection.py``).
+"""
 from __future__ import annotations
 
 import argparse
 import time
+from collections import defaultdict
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import IsolationForest
-from sklearn.metrics import precision_recall_fscore_support, roc_auc_score
 import tensorflow as tf
 from tensorflow import keras
 
+from baselines import first_difference_scores
 from data_loader import build_point_labels, iter_telemanom_channels, load_numpy_array
+from injection import (
+    InjectionSpec,
+    attribution_rank,
+    inject_anomaly,
+    sample_injections,
+    summarize_attribution,
+)
+from metrics import aggregate_series_results, anomaly_segments, evaluate_series, safe_roc_auc
 from model import build_lstm_autoencoder
 from predict import reconstruction_scores
 from preprocess import align_sequence_scores, create_sequences
 from utils import calculate_threshold, ensure_parent, moving_average, save_json
 
-
-def compute_binary_metrics(labels: np.ndarray, scores: np.ndarray, predictions: np.ndarray) -> dict[str, float]:
-    precision, recall, f1, _ = precision_recall_fscore_support(
-        labels,
-        predictions,
-        average="binary",
-        zero_division=0,
-    )
-    auc = float("nan")
-    if len(np.unique(labels)) > 1:
-        auc = float(roc_auc_score(labels, scores))
-
-    return {
-        "precision": float(precision),
-        "recall": float(recall),
-        "f1": float(f1),
-        "roc_auc": auc,
-    }
-
-
-def point_adjust_predictions(labels: np.ndarray, predictions: np.ndarray) -> np.ndarray:
-    adjusted = predictions.astype(bool).copy()
-    labels = labels.astype(int)
-    start = None
-
-    for index, value in enumerate(labels):
-        if value == 1 and start is None:
-            start = index
-        elif value == 0 and start is not None:
-            if adjusted[start:index].any():
-                adjusted[start:index] = True
-            start = None
-
-    if start is not None and adjusted[start:].any():
-        adjusted[start:] = True
-    return adjusted.astype(int)
-
-
-def compute_metric_bundle(labels: np.ndarray, scores: np.ndarray, predictions: np.ndarray) -> dict[str, float]:
-    metrics = compute_binary_metrics(labels, scores, predictions)
-    adjusted_predictions = point_adjust_predictions(labels, predictions)
-    adjusted_metrics = compute_binary_metrics(labels, scores, adjusted_predictions)
-    metrics.update(
-        {
-            "adjusted_precision": adjusted_metrics["precision"],
-            "adjusted_recall": adjusted_metrics["recall"],
-            "adjusted_f1": adjusted_metrics["f1"],
-        }
-    )
-    return metrics
+MODEL_KEYS = {
+    "ae": "lstm_autoencoder",
+    "if": "isolation_forest",
+    "diff": "first_difference",
+}
+MODEL_LABELS = {
+    "ae": "LSTM-AE",
+    "if": "Isolation Forest",
+    "diff": "|x_t - x_{t-1}|",
+}
+ROW_METRIC_KEYS = (
+    "precision",
+    "recall",
+    "f1",
+    "adjusted_precision",
+    "adjusted_recall",
+    "adjusted_f1",
+    "roc_auc",
+    "threshold",
+    "events",
+    "detected_events",
+    "mean_latency",
+    "false_alarms",
+    "false_alarms_per_1k",
+)
 
 
 def fit_autoencoder(
@@ -141,6 +146,79 @@ def sequence_scores_stream(model: keras.Model, values: np.ndarray, window_size: 
     return np.concatenate(scores)
 
 
+def window_feature_errors(model: keras.Model, values: np.ndarray, window_size: int) -> np.ndarray:
+    """Per-window, per-feature reconstruction MSE, shape (n_windows, n_features).
+
+    Window ``i`` covers ``values[i : i + window_size]``. This is the same quantity
+    ``predict.py`` uses for root-cause attribution.
+    """
+    sequences = create_sequences(np.asarray(values, dtype=np.float32), window_size=window_size)
+    reconstructed = model(tf.convert_to_tensor(sequences), training=False).numpy()
+    return np.mean(np.square(sequences - reconstructed), axis=1)
+
+
+def run_injections(
+    model: keras.Model,
+    test_values: np.ndarray,
+    specs: list[InjectionSpec],
+    window_size: int,
+    smoothing_window: int,
+    threshold: float,
+) -> list[dict]:
+    """Inject each anomaly independently into a clean copy of the test data and score attribution.
+
+    Attribution vector = per-feature reconstruction error averaged over every
+    window that contains at least one injected timestep. ``detected`` is True if
+    the smoothed AE score crosses the channel threshold inside the injected span
+    (same rule as the main evaluation).
+    """
+    records: list[dict] = []
+    n_points, n_features = test_values.shape
+    for spec in specs:
+        injected = inject_anomaly(test_values, spec)
+        # Enough left context that smoothed scores inside the span match a full-series run.
+        local_start = max(0, spec.start - (window_size - 1) - (smoothing_window - 1))
+        local_end = min(n_points, spec.end + window_size - 1)
+        errors = window_feature_errors(model, injected[local_start:local_end], window_size)
+        window_ends = local_start + np.arange(len(errors)) + window_size - 1
+
+        covering = (window_ends >= spec.start) & (window_ends <= spec.end + window_size - 2)
+        feature_scores = errors[covering].mean(axis=0)
+        rank = attribution_rank(feature_scores, spec.column)
+
+        smoothed = moving_average(errors.mean(axis=1), window=smoothing_window)
+        in_span = (window_ends >= spec.start) & (window_ends < spec.end)
+        detected = bool(np.any(smoothed[in_span] > threshold))
+
+        records.append(
+            {
+                **spec.to_dict(),
+                "n_features": int(n_features),
+                "is_telemetry_column": spec.column == 0,
+                "predicted_column": int(np.argmax(feature_scores)),
+                "rank": rank,
+                "top1_hit": rank <= 1,
+                "top3_hit": rank <= 3,
+                "detected": detected,
+            }
+        )
+    return records
+
+
+def finalize_detector(
+    labels: np.ndarray,
+    test_scores: np.ndarray,
+    threshold: float,
+) -> dict:
+    predictions = (test_scores > threshold).astype(int)
+    return {
+        **evaluate_series(labels, predictions, test_scores),
+        "threshold": float(threshold),
+        "predictions": predictions,
+        "scores": test_scores,
+    }
+
+
 def evaluate_autoencoder(
     train_values: np.ndarray,
     test_values: np.ndarray,
@@ -154,7 +232,8 @@ def evaluate_autoencoder(
     k: float,
     smoothing_window: int,
     seed: int,
-) -> dict[str, float | np.ndarray]:
+    injections: list[InjectionSpec] | None = None,
+) -> dict:
     validation_split = 0.1 if len(train_values) >= 200 else 0.0
     model, train_sequences = fit_autoencoder(
         train_values=train_values,
@@ -182,16 +261,18 @@ def evaluate_autoencoder(
     test_scores = sequence_scores_stream(model, test_values, window_size, batch_size)
     test_scores = align_sequence_scores(test_scores, len(test_values), window_size)
     test_scores = moving_average(test_scores, window=smoothing_window)
-    predictions = test_scores > threshold
-    metrics = compute_metric_bundle(labels, test_scores, predictions)
+    result = finalize_detector(labels, test_scores, threshold)
 
+    result["attribution_records"] = run_injections(
+        model,
+        test_values,
+        injections or [],
+        window_size=window_size,
+        smoothing_window=smoothing_window,
+        threshold=threshold,
+    )
     keras.backend.clear_session()
-    return {
-        **metrics,
-        "threshold": float(threshold),
-        "predictions": predictions,
-        "scores": test_scores,
-    }
+    return result
 
 
 def evaluate_isolation_forest(
@@ -203,7 +284,7 @@ def evaluate_isolation_forest(
     k: float,
     smoothing_window: int,
     seed: int,
-) -> dict[str, float | np.ndarray]:
+) -> dict:
     model = IsolationForest(
         n_estimators=200,
         contamination="auto",
@@ -212,25 +293,26 @@ def evaluate_isolation_forest(
     )
     model.fit(train_values)
 
-    train_scores = -model.score_samples(train_values)
-    train_scores = moving_average(train_scores, window=smoothing_window)
-    threshold = calculate_threshold(
-        train_scores,
-        method=threshold_method,
-        percentile=percentile,
-        k=k,
-    )
+    train_scores = moving_average(-model.score_samples(train_values), window=smoothing_window)
+    threshold = calculate_threshold(train_scores, method=threshold_method, percentile=percentile, k=k)
+    test_scores = moving_average(-model.score_samples(test_values), window=smoothing_window)
+    return finalize_detector(labels, test_scores, threshold)
 
-    test_scores = -model.score_samples(test_values)
-    test_scores = moving_average(test_scores, window=smoothing_window)
-    predictions = test_scores > threshold
-    metrics = compute_metric_bundle(labels, test_scores, predictions)
-    return {
-        **metrics,
-        "threshold": float(threshold),
-        "predictions": predictions,
-        "scores": test_scores,
-    }
+
+def evaluate_first_difference(
+    train_values: np.ndarray,
+    test_values: np.ndarray,
+    labels: np.ndarray,
+    columns: list[int] | None,
+    threshold_method: str,
+    percentile: float,
+    k: float,
+    smoothing_window: int,
+) -> dict:
+    train_scores = moving_average(first_difference_scores(train_values, columns), window=smoothing_window)
+    threshold = calculate_threshold(train_scores, method=threshold_method, percentile=percentile, k=k)
+    test_scores = moving_average(first_difference_scores(test_values, columns), window=smoothing_window)
+    return finalize_detector(labels, test_scores, threshold)
 
 
 def minmax_scale(train_values: np.ndarray, test_values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -242,15 +324,20 @@ def minmax_scale(train_values: np.ndarray, test_values: np.ndarray) -> tuple[np.
     return train_scaled.astype("float32"), test_scaled.astype("float32")
 
 
-def summarize_metrics(labels: list[np.ndarray], scores: list[np.ndarray], predictions: list[np.ndarray]) -> dict[str, float]:
-    merged_labels = np.concatenate(labels)
-    merged_scores = np.concatenate(scores)
-    merged_predictions = np.concatenate(predictions)
-    metrics = compute_metric_bundle(merged_labels, merged_scores, merged_predictions)
-    metrics["anomaly_points"] = int(merged_labels.sum())
-    metrics["evaluated_points"] = int(len(merged_labels))
-    metrics["predicted_anomalies"] = int(merged_predictions.sum())
-    return metrics
+def summarize_detector(results: list[dict], labels: list[np.ndarray]) -> dict:
+    """Pooled metrics at the top level (backwards compatible keys) plus ``channel_mean``.
+
+    Note: pooled ROC-AUC concatenates raw scores from independently scaled
+    per-channel detectors, so treat it as indicative only; the channel-mean
+    ROC-AUC is the cleaner number.
+    """
+    aggregated = aggregate_series_results(results)
+    pooled = dict(aggregated["pooled"])
+    pooled["roc_auc"] = safe_roc_auc(
+        np.concatenate(labels),
+        np.concatenate([r["scores"] for r in results]),
+    )
+    return {**pooled, "channel_mean": aggregated["channel_mean"]}
 
 
 def load_aggregate_dataset(dataset_root: str | Path, spacecraft: str) -> list[dict]:
@@ -273,6 +360,78 @@ def load_aggregate_dataset(dataset_root: str | Path, spacecraft: str) -> list[di
     ]
 
 
+def _fmt(value: float, digits: int = 3) -> str:
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return "n/a"
+    return f"{value:.{digits}f}"
+
+
+def build_markdown_report(summary: dict) -> str:
+    lines = [
+        f"# {summary['dataset']} evaluation ({summary['channel_count']} channels)",
+        "",
+        f"Window {summary['window_size']}, epochs {summary['epochs']}, latent {summary['latent_dim']}, "
+        f"threshold {summary['threshold_method']} (p={summary['percentile']}, k={summary['k']}) on smoothed "
+        f"training scores, smoothing {summary['smoothing_window']}. Diff baseline columns: "
+        f"{summary['diff_columns']}.",
+        "",
+        "## Detection",
+        "",
+        "| Model | Strict F1 (ch-mean) | Strict F1 (pooled) | Adj F1 (ch-mean) | Adj F1 (pooled) "
+        "| Pooled P / R | ROC-AUC (ch-mean) | Events detected | Mean latency (steps) | False alarms / 1k pts |",
+        "|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    for prefix, key in MODEL_KEYS.items():
+        s = summary[key]
+        cm = s["channel_mean"]
+        lines.append(
+            f"| {MODEL_LABELS[prefix]} | {_fmt(cm['f1'])} | {_fmt(s['f1'])} | {_fmt(cm['adjusted_f1'])} "
+            f"| {_fmt(s['adjusted_f1'])} | {_fmt(s['precision'])} / {_fmt(s['recall'])} | {_fmt(cm['roc_auc'])} "
+            f"| {s['detected_events']}/{s['events']} | {_fmt(s['mean_latency'], 1)} "
+            f"| {_fmt(s['false_alarms_per_1k'], 2)} |"
+        )
+    lines += [
+        "",
+        "Latency is pooled over detected events only (an alert must fall inside the labelled event). "
+        "A false alarm is a contiguous alert run that does not overlap any labelled event.",
+    ]
+
+    attribution = summary.get("attribution")
+    if attribution and attribution.get("n_injections"):
+        lines += [
+            "",
+            f"## Root-cause attribution ({attribution['n_injections']} injected anomalies)",
+            "",
+            "| Type | n | Top-1 hit | Top-3 hit | Top-1 chance | Top-3 chance | Mean rank | AE detected |",
+            "|---|---|---|---|---|---|---|---|",
+        ]
+        for kind, block in attribution["by_type"].items():
+            if not block.get("n"):
+                continue
+            lines.append(
+                f"| {kind} | {block['n']} | {_fmt(block['top1_hit_rate'])} | {_fmt(block['top3_hit_rate'])} "
+                f"| {_fmt(block['top1_chance'])} | {_fmt(block['top3_chance'])} | {_fmt(block['mean_rank'], 1)} "
+                f"| {_fmt(block.get('detection_rate', float('nan')))} |"
+            )
+        split = attribution.get("by_target_column_type", {})
+        if split:
+            lines += [
+                "",
+                "| Injected into | n | Top-1 hit | Top-3 hit |",
+                "|---|---|---|---|",
+            ]
+            for name, block in split.items():
+                if block.get("n"):
+                    lines.append(
+                        f"| {name} | {block['n']} | {_fmt(block['top1_hit_rate'])} | {_fmt(block['top3_hit_rate'])} |"
+                    )
+        lines += [
+            "",
+            "Chance = expected hit rate of a uniformly random feature ranking.",
+        ]
+    return "\n".join(lines) + "\n"
+
+
 def run_benchmark(
     dataset_root: str,
     spacecraft: str,
@@ -287,6 +446,8 @@ def run_benchmark(
     smoothing_window: int,
     limit_channels: int | None,
     seed: int,
+    n_injections: int = 200,
+    diff_columns: str = "telemetry",
 ) -> dict:
     try:
         channels = iter_telemanom_channels(dataset_root, spacecraft=spacecraft, limit=limit_channels)
@@ -297,93 +458,132 @@ def run_benchmark(
     if not channels:
         raise ValueError(f"No channels found for spacecraft={spacecraft} in {dataset_root}.")
 
+    # Scale and label every channel up front so injections can be sampled across channels.
+    for channel in channels:
+        channel["train_scaled"], channel["test_scaled"] = minmax_scale(channel["train"], channel["test"])
+        if "labels" not in channel:
+            channel["labels"] = build_point_labels(len(channel["test"]), channel["anomaly_sequences"])
+
+    diff_cols = [0] if diff_columns == "telemetry" else None
+    injection_specs: list[InjectionSpec] = []
+    if n_injections > 0:
+        injection_specs = sample_injections(
+            [
+                {
+                    # Key by position: the upstream metadata lists some channel ids twice (SMAP P-2).
+                    "channel_id": str(position),
+                    "n_points": len(c["test_scaled"]),
+                    "train_std": c["train_scaled"].std(axis=0),
+                    "segments": anomaly_segments(c["labels"]),
+                }
+                for position, c in enumerate(channels)
+            ],
+            n_injections=n_injections,
+            rng=np.random.default_rng(seed),
+            min_start=window_size + smoothing_window,
+            avoid_margin=window_size,
+        )
+    specs_by_channel: dict[int, list[InjectionSpec]] = defaultdict(list)
+    for spec in injection_specs:
+        position = int(spec.channel_id)
+        specs_by_channel[position].append(replace(spec, channel_id=channels[position]["channel_id"]))
+
     rows: list[dict] = []
-    ae_labels: list[np.ndarray] = []
-    ae_scores: list[np.ndarray] = []
-    ae_predictions: list[np.ndarray] = []
-    iso_labels: list[np.ndarray] = []
-    iso_scores: list[np.ndarray] = []
-    iso_predictions: list[np.ndarray] = []
+    results: dict[str, list[dict]] = {prefix: [] for prefix in MODEL_KEYS}
+    all_labels: list[np.ndarray] = []
+    attribution_records: list[dict] = []
 
     started = time.time()
     for index, channel in enumerate(channels, start=1):
         channel_id = channel["channel_id"]
-        train_values, test_values = minmax_scale(channel["train"], channel["test"])
-        if "labels" in channel:
-            labels = channel["labels"]
-        else:
-            labels = build_point_labels(len(test_values), channel["anomaly_sequences"])
+        train_values, test_values, labels = channel["train_scaled"], channel["test_scaled"], channel["labels"]
 
-        autoencoder = evaluate_autoencoder(
-            train_values=train_values,
-            test_values=test_values,
-            labels=labels,
-            window_size=window_size,
-            latent_dim=latent_dim,
-            epochs=epochs,
-            batch_size=batch_size,
-            threshold_method=threshold_method,
-            percentile=percentile,
-            k=k,
-            smoothing_window=smoothing_window,
-            seed=seed + index,
-        )
-        isolation_forest = evaluate_isolation_forest(
-            train_values=train_values,
-            test_values=test_values,
-            labels=labels,
-            threshold_method=threshold_method,
-            percentile=percentile,
-            k=k,
-            smoothing_window=smoothing_window,
-            seed=seed + index,
-        )
+        per_model = {
+            "ae": evaluate_autoencoder(
+                train_values=train_values,
+                test_values=test_values,
+                labels=labels,
+                window_size=window_size,
+                latent_dim=latent_dim,
+                epochs=epochs,
+                batch_size=batch_size,
+                threshold_method=threshold_method,
+                percentile=percentile,
+                k=k,
+                smoothing_window=smoothing_window,
+                seed=seed + index,
+                injections=specs_by_channel.get(index - 1, []),
+            ),
+            "if": evaluate_isolation_forest(
+                train_values=train_values,
+                test_values=test_values,
+                labels=labels,
+                threshold_method=threshold_method,
+                percentile=percentile,
+                k=k,
+                smoothing_window=smoothing_window,
+                seed=seed + index,
+            ),
+            "diff": evaluate_first_difference(
+                train_values=train_values,
+                test_values=test_values,
+                labels=labels,
+                columns=diff_cols,
+                threshold_method=threshold_method,
+                percentile=percentile,
+                k=k,
+                smoothing_window=smoothing_window,
+            ),
+        }
 
-        rows.append(
-            {
-                "channel_id": channel_id,
-                "class": channel["class"],
-                "test_points": len(test_values),
-                "anomaly_points": int(labels.sum()),
-                "ae_precision": autoencoder["precision"],
-                "ae_recall": autoencoder["recall"],
-                "ae_f1": autoencoder["f1"],
-                "ae_adjusted_precision": autoencoder["adjusted_precision"],
-                "ae_adjusted_recall": autoencoder["adjusted_recall"],
-                "ae_adjusted_f1": autoencoder["adjusted_f1"],
-                "ae_roc_auc": autoencoder["roc_auc"],
-                "ae_threshold": autoencoder["threshold"],
-                "if_precision": isolation_forest["precision"],
-                "if_recall": isolation_forest["recall"],
-                "if_f1": isolation_forest["f1"],
-                "if_adjusted_precision": isolation_forest["adjusted_precision"],
-                "if_adjusted_recall": isolation_forest["adjusted_recall"],
-                "if_adjusted_f1": isolation_forest["adjusted_f1"],
-                "if_roc_auc": isolation_forest["roc_auc"],
-                "if_threshold": isolation_forest["threshold"],
-            }
-        )
+        row = {
+            "channel_id": channel_id,
+            "class": channel.get("class", ""),
+            "test_points": int(len(test_values)),
+            "anomaly_points": int(labels.sum()),
+        }
+        for prefix, result in per_model.items():
+            for key in ROW_METRIC_KEYS:
+                row[f"{prefix}_{key}"] = result[key]
+            results[prefix].append(result)
+        rows.append(row)
+        all_labels.append(labels)
+        attribution_records.extend(per_model["ae"]["attribution_records"])
 
-        ae_labels.append(labels)
-        ae_scores.append(autoencoder["scores"])
-        ae_predictions.append(autoencoder["predictions"])
-        iso_labels.append(labels)
-        iso_scores.append(isolation_forest["scores"])
-        iso_predictions.append(isolation_forest["predictions"])
-
+        ae, iso, diff = per_model["ae"], per_model["if"], per_model["diff"]
         print(
             f"[{index:02d}/{len(channels)}] {channel_id} | "
-            f"AE F1={autoencoder['f1']:.3f} / adj {autoencoder['adjusted_f1']:.3f} | "
-            f"IF F1={isolation_forest['f1']:.3f} / adj {isolation_forest['adjusted_f1']:.3f}"
+            f"AE F1={ae['f1']:.3f}/adj {ae['adjusted_f1']:.3f} | "
+            f"IF F1={iso['f1']:.3f}/adj {iso['adjusted_f1']:.3f} | "
+            f"Diff F1={diff['f1']:.3f}/adj {diff['adjusted_f1']:.3f} | "
+            f"injections={len(ae['attribution_records'])}",
+            flush=True,
         )
 
-    ae_summary = summarize_metrics(ae_labels, ae_scores, ae_predictions)
-    iso_summary = summarize_metrics(iso_labels, iso_scores, iso_predictions)
-    output_dir = ensure_parent(Path(output_dir) / "placeholder.txt").parent
-    metrics_path = output_dir / f"{spacecraft.lower()}_channel_metrics.csv"
-    summary_path = output_dir / f"{spacecraft.lower()}_benchmark_summary.json"
+    summaries = {prefix: summarize_detector(results[prefix], all_labels) for prefix in MODEL_KEYS}
+
+    attribution_summary = summarize_attribution(attribution_records)
+    by_column_type = {
+        "telemetry column (0)": summarize_attribution(
+            [r for r in attribution_records if r["is_telemetry_column"]]
+        )["overall"],
+        "command columns (1+)": summarize_attribution(
+            [r for r in attribution_records if not r["is_telemetry_column"]]
+        )["overall"],
+    }
+
+    output_dir_path = Path(output_dir)
+    ensure_parent(output_dir_path / "placeholder.txt")
+    stem = spacecraft.lower()
+    metrics_path = output_dir_path / f"{stem}_channel_metrics.csv"
+    summary_path = output_dir_path / f"{stem}_benchmark_summary.json"
+    attribution_path = output_dir_path / f"{stem}_attribution_injections.csv"
+    report_path = output_dir_path / f"{stem}_evaluation_report.md"
 
     pd.DataFrame(rows).to_csv(metrics_path, index=False)
+    pd.DataFrame(attribution_records).to_csv(attribution_path, index=False)
+
+    ae_summary, iso_summary = summaries["ae"], summaries["if"]
     summary = {
         "dataset": spacecraft,
         "channel_count": len(channels),
@@ -395,23 +595,32 @@ def run_benchmark(
         "percentile": percentile,
         "k": k,
         "smoothing_window": smoothing_window,
+        "diff_columns": diff_columns,
+        "seed": seed,
         "runtime_seconds": round(time.time() - started, 2),
-        "lstm_autoencoder": ae_summary,
-        "isolation_forest": iso_summary,
-        "f1_improvement_vs_isolation_forest_pct": round(
-            (ae_summary["f1"] - iso_summary["f1"]) * 100,
-            2,
-        ),
+        **{MODEL_KEYS[prefix]: summaries[prefix] for prefix in MODEL_KEYS},
+        "attribution": {
+            "n_injections": len(attribution_records),
+            "method": "argmax of per-feature reconstruction MSE, averaged over windows containing the injection",
+            "by_type": attribution_summary,
+            "by_target_column_type": by_column_type,
+        },
+        "f1_improvement_vs_isolation_forest_pct": round((ae_summary["f1"] - iso_summary["f1"]) * 100, 2),
         "adjusted_f1_improvement_vs_isolation_forest_pct": round(
             (ae_summary["adjusted_f1"] - iso_summary["adjusted_f1"]) * 100,
             2,
         ),
     }
     save_json(summary, summary_path)
+    report = build_markdown_report(summary)
+    report_path.write_text(report, encoding="utf-8")
     return {
         "metrics_path": str(metrics_path),
         "summary_path": str(summary_path),
+        "attribution_path": str(attribution_path),
+        "report_path": str(report_path),
         "summary": summary,
+        "report": report,
     }
 
 
@@ -430,7 +639,24 @@ def main() -> None:
     parser.add_argument("--smoothing-window", type=int, default=5)
     parser.add_argument("--limit-channels", type=int, default=None)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--n-injections",
+        type=int,
+        default=200,
+        help="Synthetic anomalies injected for attribution validation (0 disables).",
+    )
+    parser.add_argument(
+        "--diff-columns",
+        choices=["telemetry", "all"],
+        default="telemetry",
+        help="Columns used by the |x_t - x_{t-1}| baseline: the telemetry value (column 0) or max over all.",
+    )
     args = parser.parse_args()
+
+    # Reproducibility: seed Python/NumPy/TF globally and force deterministic TF kernels
+    # (per-channel models are additionally re-seeded with seed + channel index).
+    keras.utils.set_random_seed(args.seed)
+    tf.config.experimental.enable_op_determinism()
 
     result = run_benchmark(
         dataset_root=args.dataset_root,
@@ -446,27 +672,16 @@ def main() -> None:
         smoothing_window=args.smoothing_window,
         limit_channels=args.limit_channels,
         seed=args.seed,
+        n_injections=args.n_injections,
+        diff_columns=args.diff_columns,
     )
 
-    summary = result["summary"]
     print(f"Saved per-channel metrics to {result['metrics_path']}")
     print(f"Saved summary to {result['summary_path']}")
-    print(
-        "LSTM Autoencoder | "
-        f"Precision={summary['lstm_autoencoder']['precision']:.4f} "
-        f"Recall={summary['lstm_autoencoder']['recall']:.4f} "
-        f"F1={summary['lstm_autoencoder']['f1']:.4f} "
-        f"Adj-F1={summary['lstm_autoencoder']['adjusted_f1']:.4f} "
-        f"AUC={summary['lstm_autoencoder']['roc_auc']:.4f}"
-    )
-    print(
-        "Isolation Forest | "
-        f"Precision={summary['isolation_forest']['precision']:.4f} "
-        f"Recall={summary['isolation_forest']['recall']:.4f} "
-        f"F1={summary['isolation_forest']['f1']:.4f} "
-        f"Adj-F1={summary['isolation_forest']['adjusted_f1']:.4f} "
-        f"AUC={summary['isolation_forest']['roc_auc']:.4f}"
-    )
+    print(f"Saved attribution injections to {result['attribution_path']}")
+    print(f"Saved report to {result['report_path']}")
+    print()
+    print(result["report"])
 
 
 if __name__ == "__main__":
