@@ -12,18 +12,18 @@ Window 60, epochs 5, latent 32, threshold percentile (p=99.0, k=3.0) on smoothed
 
 Latency is pooled over detected events only (an alert must fall inside the labelled event). A false alarm is a contiguous alert run that does not overlap any labelled event.
 
-## Root-cause attribution (200 injected anomalies)
+## Root-cause attribution (1000 injected anomalies)
 
 | Type | n | Top-1 hit | Top-3 hit | Top-1 chance | Top-3 chance | Mean rank | AE detected |
 |---|---|---|---|---|---|---|---|
-| spike | 67 | 0.284 | 0.657 | 0.040 | 0.120 | 4.5 | 0.030 |
-| level_shift | 67 | 0.642 | 0.866 | 0.040 | 0.120 | 2.1 | 0.343 |
-| drift | 66 | 0.621 | 0.788 | 0.040 | 0.120 | 2.6 | 0.470 |
-| overall | 200 | 0.515 | 0.770 | 0.040 | 0.120 | 3.1 | 0.280 |
+| spike | 334 | 0.257 | 0.545 | 0.040 | 0.120 | 5.2 | 0.057 |
+| level_shift | 333 | 0.568 | 0.829 | 0.040 | 0.120 | 2.6 | 0.396 |
+| drift | 333 | 0.526 | 0.739 | 0.040 | 0.120 | 3.3 | 0.435 |
+| overall | 1000 | 0.450 | 0.704 | 0.040 | 0.120 | 3.7 | 0.296 |
 
 | Injected into | n | Top-1 hit | Top-3 hit |
 |---|---|---|---|
-| telemetry column (0) | 11 | 0.818 | 1.000 |
-| command columns (1+) | 189 | 0.497 | 0.757 |
+| telemetry column (0) | 75 | 0.867 | 0.987 |
+| command columns (1+) | 925 | 0.416 | 0.681 |
 
 Chance = expected hit rate of a uniformly random feature ranking.

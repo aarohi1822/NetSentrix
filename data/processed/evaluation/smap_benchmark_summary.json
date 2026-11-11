@@ -11,7 +11,7 @@
   "smoothing_window": 5,
   "diff_columns": "telemetry",
   "seed": 42,
-  "runtime_seconds": 492.26,
+  "runtime_seconds": 344.31,
   "lstm_autoencoder": {
     "precision": 0.49687620146097655,
     "recall": 0.3697650298630235,
@@ -106,64 +106,64 @@
     }
   },
   "attribution": {
-    "n_injections": 200,
+    "n_injections": 1000,
     "method": "argmax of per-feature reconstruction MSE, averaged over windows containing the injection",
     "by_type": {
       "spike": {
-        "n": 67,
-        "mean_rank": 4.492537313432836,
-        "top1_hit_rate": 0.2835820895522388,
+        "n": 334,
+        "mean_rank": 5.212574850299402,
+        "top1_hit_rate": 0.25748502994011974,
         "top1_chance": 0.04,
-        "top3_hit_rate": 0.6567164179104478,
-        "top3_chance": 0.11999999999999998,
-        "detection_rate": 0.029850746268656716
+        "top3_hit_rate": 0.5449101796407185,
+        "top3_chance": 0.12,
+        "detection_rate": 0.05688622754491018
       },
       "level_shift": {
-        "n": 67,
-        "mean_rank": 2.08955223880597,
-        "top1_hit_rate": 0.6417910447761194,
+        "n": 333,
+        "mean_rank": 2.6036036036036037,
+        "top1_hit_rate": 0.5675675675675675,
         "top1_chance": 0.04,
-        "top3_hit_rate": 0.8656716417910447,
-        "top3_chance": 0.11999999999999998,
-        "detection_rate": 0.34328358208955223
+        "top3_hit_rate": 0.8288288288288288,
+        "top3_chance": 0.12000000000000001,
+        "detection_rate": 0.3963963963963964
       },
       "drift": {
-        "n": 66,
-        "mean_rank": 2.621212121212121,
-        "top1_hit_rate": 0.6212121212121212,
+        "n": 333,
+        "mean_rank": 3.339339339339339,
+        "top1_hit_rate": 0.5255255255255256,
         "top1_chance": 0.04,
-        "top3_hit_rate": 0.7878787878787878,
-        "top3_chance": 0.12,
-        "detection_rate": 0.4696969696969697
+        "top3_hit_rate": 0.7387387387387387,
+        "top3_chance": 0.12000000000000001,
+        "detection_rate": 0.43543543543543545
       },
       "overall": {
-        "n": 200,
-        "mean_rank": 3.07,
-        "top1_hit_rate": 0.515,
-        "top1_chance": 0.039999999999999994,
-        "top3_hit_rate": 0.77,
-        "top3_chance": 0.12000000000000004,
-        "detection_rate": 0.28
+        "n": 1000,
+        "mean_rank": 3.72,
+        "top1_hit_rate": 0.45,
+        "top1_chance": 0.04,
+        "top3_hit_rate": 0.704,
+        "top3_chance": 0.12000000000000005,
+        "detection_rate": 0.296
       }
     },
     "by_target_column_type": {
       "telemetry column (0)": {
-        "n": 11,
-        "mean_rank": 1.2727272727272727,
-        "top1_hit_rate": 0.8181818181818182,
-        "top1_chance": 0.039999999999999994,
-        "top3_hit_rate": 1.0,
-        "top3_chance": 0.12000000000000002,
-        "detection_rate": 0.36363636363636365
+        "n": 75,
+        "mean_rank": 1.24,
+        "top1_hit_rate": 0.8666666666666667,
+        "top1_chance": 0.04,
+        "top3_hit_rate": 0.9866666666666667,
+        "top3_chance": 0.11999999999999998,
+        "detection_rate": 0.52
       },
       "command columns (1+)": {
-        "n": 189,
-        "mean_rank": 3.1746031746031744,
-        "top1_hit_rate": 0.4973544973544973,
-        "top1_chance": 0.039999999999999994,
-        "top3_hit_rate": 0.7566137566137566,
-        "top3_chance": 0.12,
-        "detection_rate": 0.2751322751322751
+        "n": 925,
+        "mean_rank": 3.921081081081081,
+        "top1_hit_rate": 0.41621621621621624,
+        "top1_chance": 0.04,
+        "top3_hit_rate": 0.6810810810810811,
+        "top3_chance": 0.12000000000000004,
+        "detection_rate": 0.27783783783783783
       }
     }
   },
