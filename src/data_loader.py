@@ -91,6 +91,15 @@ def iter_telemanom_channels(
     dataset_root = Path(dataset_root)
     metadata = load_telemanom_metadata(dataset_root / "labeled_anomalies.csv")
     rows = metadata[metadata["spacecraft"].str.upper() == spacecraft.upper()].copy()
+    # The upstream metadata lists some channels twice (SMAP P-2, with slightly different
+    # anomaly ranges). Keep the first row so each channel is evaluated once.
+    duplicated = rows["chan_id"].duplicated(keep="first")
+    if duplicated.any():
+        print(
+            f"Note: dropping duplicate metadata rows for {sorted(rows.loc[duplicated, 'chan_id'].unique())} "
+            "(keeping the first occurrence)."
+        )
+        rows = rows[~duplicated]
     if limit is not None:
         rows = rows.head(limit)
 
