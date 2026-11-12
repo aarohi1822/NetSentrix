@@ -452,6 +452,10 @@ def run_benchmark(
     try:
         channels = iter_telemanom_channels(dataset_root, spacecraft=spacecraft, limit=limit_channels)
     except FileNotFoundError:
+        print(
+            "WARNING: per-channel Telemanom files not found; using the AGGREGATE dataset. "
+            "Results are NOT comparable to results/metrics.json. Run src/download_nasa_data.py first."
+        )
         channels = load_aggregate_dataset(dataset_root, spacecraft=spacecraft)
         if limit_channels is not None:
             channels = channels[:limit_channels]

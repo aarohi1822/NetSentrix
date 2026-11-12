@@ -97,8 +97,8 @@ python src/collect_results.py --input-dir data/processed/evaluation --update-rea
 git clone https://github.com/aarohi1822/NetSentrix.git
 cd NetSentrix
 python3.10 -m venv .venv && source .venv/bin/activate
-pip install -r requirements-dev.txt     # app + benchmark dependencies, plus pytest
-pytest                                  # unit tests for metrics, baselines, injection, loader
+pip install -r requirements-dev.txt     # app + benchmark dependencies, plus pytest and the Kaggle CLI
+pytest                                  # unit tests for metrics, baselines, injection, loader, download
 ```
 
 **Dashboard** (a model trained on the bundled sample in `data/raw/train.csv` is included in `models/`):
@@ -116,14 +116,22 @@ python src/train.py --input data/raw/train.csv --window-size 60 --epochs 40 --th
 python src/predict.py --input path/to/new_data.csv --output data/processed/anomaly_report.csv
 ```
 
-**Reproduce the benchmark.** The benchmark needs the per-channel Telemanom files: `data/nasa_telemanom/train/*.npy`, `test/*.npy` and `labeled_anomalies.csv`.
-
-> ⚠️ The official Telemanom archive (`s3-us-west-2.amazonaws.com/telemanom/data.zip`) currently returns *Access Denied*. When it can't download it, `download_nasa_data.py` falls back to an aggregate SMAP mirror, and the benchmark then runs on that single concatenated series. Those results are **not comparable** to the table above. If the script prints "Falling back to SMAP aggregate mirror", get the per-channel Telemanom files from another copy and place them in `data/nasa_telemanom/` before running.
-
-With the data in place, this takes roughly 20–30 minutes on a laptop CPU:
+**Reproduce the benchmark.** First get the per-channel NASA SMAP/MSL data (Telemanom release). The official S3 archive now returns *Access Denied*; the upstream project distributes the data through [Kaggle](https://www.kaggle.com/datasets/patrickfleith/nasa-anomaly-detection-dataset-smap-msl) instead. Use one of these options:
 
 ```bash
+# Option A (works for everyone): sign in to Kaggle, click "Download" on the page above, then
+python src/download_nasa_data.py --from-zip ~/Downloads/archive.zip
+
+# Option B: automatic download via the Kaggle CLI (installed by requirements-dev.txt),
+# needs a Kaggle API key in ~/.kaggle/kaggle.json (kaggle.com → Settings → API)
 python src/download_nasa_data.py
+```
+
+Either way, the script checks every file against [`data/nasa_telemanom.sha256`](data/nasa_telemanom.sha256), the SHA-256 of the exact files behind `results/metrics.json`. If any file differs, it stops. The Kaggle copy has been verified to match byte for byte. If no source works, the script stops with instructions instead of silently using different data. The old aggregate SMAP mirror is still available with `--allow-aggregate`, but its results are not comparable.
+
+Then run the benchmark. This takes roughly 20–30 minutes on a laptop CPU:
+
+```bash
 python src/benchmark_smap.py --spacecraft SMAP --epochs 5 --batch-size 256 --n-injections 1000 --output-dir data/processed/evaluation
 python src/benchmark_smap.py --spacecraft MSL  --epochs 5 --batch-size 256 --n-injections 1000 --output-dir data/processed/evaluation
 python src/collect_results.py --input-dir data/processed/evaluation --update-readme
@@ -139,7 +147,7 @@ The dashboard's Benchmark tab reads `data/processed/smap_benchmark_summary.json`
 - **What "root cause" means here.** Each SMAP/MSL channel has one telemetry value (column 0) plus binary command flags, so attribution ranks inputs *within* a channel, not across physical sensors. Most injected anomalies land in command columns, and attribution is much stronger for telemetry-column injections (see `results/metrics.json → attribution.by_target_column_type`).
 - **Synthetic attribution test.** Injected spikes, shifts and drifts may not resemble real faults.
 - **Benchmark labels.** SMAP/MSL labels are coarse and have known quality issues (Wu & Keogh, *Current Time Series Anomaly Detection Benchmarks are Flawed and are Creating the Illusion of Progress*, 2021). Keep that in mind when reading any score on these datasets.
-- **Dataset availability.** The official per-channel data download is currently unavailable (see *Reproduce the benchmark*). The download script's fallback mirror gives a different, non-comparable setup.
+- **Dataset access.** The data now comes from Kaggle, which needs a free account (browser download) or an API key (CLI). The original S3 archive is offline.
 - **Pooled ROC-AUC caveat.** Pooled ROC-AUC concatenates scores from independently scaled per-channel models and is only indicative. The table reports the per-channel mean.
 - **Demo scope.** The live demo's monitoring tabs run on a small synthetic sample (`data/raw/train.csv`), not on spacecraft data. The free hosting tier sleeps when idle.
 
@@ -153,14 +161,14 @@ src/
   baselines.py           # first-difference baseline
   injection.py           # synthetic anomalies + attribution hit rates
   collect_results.py     # builds results/metrics.json and the README results table
-  download_nasa_data.py
+  download_nasa_data.py  # Kaggle / zip download + SHA-256 verification
 app/app.py               # Streamlit dashboard
 results/metrics.json     # all benchmark results (source of the table above)
 data/processed/evaluation/   # per-dataset benchmark outputs and reports
 models/                  # trained demo model, scaler, config
 tests/                   # pytest suite
 requirements.txt         # pinned runtime dependencies
-requirements-dev.txt     # + pytest
+requirements-dev.txt     # + pytest, kaggle CLI
 ```
 
 ## License
