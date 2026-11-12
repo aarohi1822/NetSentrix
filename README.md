@@ -1,24 +1,56 @@
-# IoT Sentinel — Explainable Real-Time IoT Sensor Anomaly Detection
+# IoT Sentinel — Explainable Sensor Anomaly Detection
 
-![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat&logo=python&logoColor=white)
-![TensorFlow](https://img.shields.io/badge/TensorFlow-Keras-FF6F00?style=flat&logo=tensorflow&logoColor=white)
-![Streamlit](https://img.shields.io/badge/Streamlit-Dashboard-FF4B4B?style=flat&logo=streamlit&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.10-3776AB?style=flat&logo=python&logoColor=white)
+![TensorFlow](https://img.shields.io/badge/TensorFlow-2.15-FF6F00?style=flat&logo=tensorflow&logoColor=white)
+![Streamlit](https://img.shields.io/badge/Streamlit-1.33-FF4B4B?style=flat&logo=streamlit&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green?style=flat)
 
-> Industrial IoT systems generate dense, noisy sensor streams where anomalies are rare but costly. This project trains an LSTM autoencoder on normal operating data to detect anomalies via reconstruction error — no labels required at inference. Evaluated on all NASA SMAP and MSL channels against Isolation Forest and a trivial first-difference baseline, the LSTM autoencoder has the **highest strict point-wise F1 and the fewest false alarms** on both datasets; the baselines detect more anomaly events and score higher on the more lenient point-adjusted F1 (see [results](#benchmark-results--nasa-smap--msl)). Root-cause attribution is validated on injected anomalies, and a Streamlit dashboard is included.
+An LSTM autoencoder that flags anomalies in multivariate sensor streams from reconstruction error, reports which input drove each alert, and ships as a Streamlit dashboard. It is benchmarked on all NASA SMAP and MSL channels against Isolation Forest and a trivial baseline.
 
-**[Live Demo →](https://iot-sentinel-aarohigs.streamlit.app/)**
-
----
-
-## Architecture
-CSV Input → Preprocessing (MinMax + Sliding Windows) → LSTM Autoencoder (train on normal only)
-→ Reconstruction Error (MA Smoothing) → Thresholding (Severity Labels)
-→ Explainability (Root-Cause Ranking) → Streamlit Dashboard
+**[Live demo →](https://iot-sentinel-aarohigs.streamlit.app/)** (hosted on Streamlit Community Cloud; if it has been idle, click *"Yes, get this app back up!"* and wait about a minute)
 
 ---
 
-## Benchmark Results — NASA SMAP & MSL
+## Problem
+
+Sensor and telemetry streams are long, noisy and almost entirely normal. Labelled faults are rare, so a detector has to learn "normal" without labels. To be useful to an operator it must also:
+
+- raise few false alarms, because every alert costs someone's attention;
+- catch real incidents soon after they start;
+- say *where* to look, not only *that* something is wrong.
+
+Many published results report only point-adjusted F1. That metric credits a whole anomaly as detected if any single point in it is flagged, which can make weak detectors look strong. This project reports strict and point-adjusted metrics side by side, plus operator-facing numbers, against a deliberately trivial baseline.
+
+## Approach
+
+```
+sensor CSV / telemetry → min-max scaling (fit on training data)
+  → sliding windows (60 steps) → LSTM autoencoder (trained on normal data only)
+  → per-window reconstruction MSE → moving-average smoothing
+  → threshold = 99th percentile of smoothed training scores → alerts
+  → root cause = input column with the largest reconstruction error
+```
+
+- **Model:** LSTM encoder (32 units) → repeat → LSTM decoder → per-timestep dense layer, trained with MSE on windows of normal data, with early stopping on a 10% validation split.
+- **Threshold:** fixed from training scores only. The test labels are never used to tune it.
+- **Root cause:** each input column's reconstruction error is ranked; the top column is reported as the likely cause.
+
+**Benchmark protocol** ([`src/benchmark_smap.py`](src/benchmark_smap.py))
+
+- **Data:** NASA SMAP and MSL (Telemanom release). Each channel is modelled separately on its own train/test split. The duplicate SMAP `P-2` metadata row is dropped, leaving 54 SMAP and 27 MSL channels.
+- **Detectors:** all three share the same scaling, smoothing and threshold rule:
+  - the LSTM autoencoder;
+  - Isolation Forest (200 trees);
+  - a trivial baseline scoring `|x_t − x_{t−1}|` on the telemetry value.
+- **Metrics** ([`src/metrics.py`](src/metrics.py)):
+  - strict and point-adjusted precision, recall and F1, as a per-channel mean and pooled over all points (point adjustment is applied per channel before pooling);
+  - ROC-AUC;
+  - mean detection latency;
+  - false alarms per 1,000 points.
+- **Attribution check** ([`src/injection.py`](src/injection.py)): 1,000 synthetic anomalies per dataset (spike, level shift, gradual drift) are injected into random input columns and timesteps of the test data. The check measures how often the injected column is ranked top-1 or top-3.
+- **Reproducibility:** fixed seeds and deterministic TensorFlow ops; repeated runs produce identical outputs. Everything is saved to [`results/metrics.json`](results/metrics.json), and the table below is generated from that file.
+
+## Results
 
 <!-- RESULTS:START (generated by src/collect_results.py from results/metrics.json; do not edit) -->
 Generated from [`results/metrics.json`](results/metrics.json). All detectors use the same per-channel test split and the same threshold rule (percentile / mean+k·std of smoothed *training* scores). **ch-mean** = unweighted mean over channels; **pooled** = recomputed over all test points (point adjustment applied per channel first).
@@ -51,46 +83,44 @@ python src/collect_results.py --input-dir data/processed/evaluation --update-rea
 ```
 <!-- RESULTS:END -->
 
----
+**Reading the table**
 
-## What Makes This Different
+- **Strict F1 and false alarms:** the LSTM autoencoder has the highest strict F1 and by far the fewest false alarms on both datasets. When it alerts, it is usually right.
+- **Event coverage:** Isolation Forest and the trivial baseline detect more anomaly events. On point-adjusted F1 the trivial baseline beats both learned models, which shows how lenient that metric is.
+- **Attribution:** the attribution check finds the right input well above chance for level shifts and drifts, and much less reliably for single-point spikes.
 
-Unlike typical anomaly detection notebooks, this is product-shaped and benchmarked end-to-end:
+## How to run
 
-- **Honest benchmark** — strict and point-adjusted F1, detection latency and false alarms per 1k points against Isolation Forest and a trivial baseline on NASA SMAP + MSL; seeded, deterministic, saved to [`results/metrics.json`](results/metrics.json)
-- **Root-cause sensor ranking** — every anomaly reports which input drove the reconstruction error; validated with 1,000 injected anomalies per dataset (spikes are the weak spot, see the attribution table)
-- **Live replay simulation** — streams CSV data row-by-row to demo real-time IoT monitoring without extra infrastructure
-- **Threshold lab** — compare trained, percentile, mean/std, and manual thresholds side-by-side with severity labels (Warning / Critical)
-- **No label leakage** — model is trained exclusively on `label=0` rows; the threshold is saved and reused for production inference
-
----
-
-## Quick Start
+**Install** (Python 3.10):
 
 ```bash
-# Install
-git clone https://github.com/your-username/iot-sentinel
-cd iot-sentinel
-pip install -r requirements.txt
+git clone https://github.com/aarohi1822/NetSentrix.git
+cd NetSentrix
+python3.10 -m venv .venv && source .venv/bin/activate
+pip install -r requirements-dev.txt     # app + benchmark dependencies, plus pytest
+pytest                                  # unit tests for metrics, baselines, injection, loader
+```
 
-# Train
-python src/train.py \
-  --input data/raw/train.csv \
-  --window-size 60 \
-  --epochs 40 \
-  --threshold-method percentile \
-  --percentile 99
+**Dashboard** (a model trained on the bundled sample in `data/raw/train.csv` is included in `models/`):
 
-# Predict
-python src/predict.py --input data/raw/test.csv --output data/processed/anomaly_report.csv
-
-# Launch dashboard
+```bash
 streamlit run app/app.py
 ```
 
----
+The six tabs are Monitor, Live Replay, Root Cause, Threshold Lab, Benchmark (SMAP results) and Report.
 
-## NASA SMAP / MSL Benchmark
+**Train and predict on your own CSV.** Use numeric sensor columns, plus an optional `label` column (0 = normal; only those rows are used for training) and an optional timestamp column:
+
+```bash
+python src/train.py --input data/raw/train.csv --window-size 60 --epochs 40 --threshold-method percentile --percentile 99
+python src/predict.py --input path/to/new_data.csv --output data/processed/anomaly_report.csv
+```
+
+**Reproduce the benchmark.** The benchmark needs the per-channel Telemanom files: `data/nasa_telemanom/train/*.npy`, `test/*.npy` and `labeled_anomalies.csv`.
+
+> ⚠️ The official Telemanom archive (`s3-us-west-2.amazonaws.com/telemanom/data.zip`) currently returns *Access Denied*. When it can't download it, `download_nasa_data.py` falls back to an aggregate SMAP mirror, and the benchmark then runs on that single concatenated series. Those results are **not comparable** to the table above. If the script prints "Falling back to SMAP aggregate mirror", get the per-channel Telemanom files from another copy and place them in `data/nasa_telemanom/` before running.
+
+With the data in place, this takes roughly 20–30 minutes on a laptop CPU:
 
 ```bash
 python src/download_nasa_data.py
@@ -99,98 +129,40 @@ python src/benchmark_smap.py --spacecraft MSL  --epochs 5 --batch-size 256 --n-i
 python src/collect_results.py --input-dir data/processed/evaluation --update-readme
 ```
 
-Per spacecraft, `benchmark_smap.py` writes `{smap,msl}_channel_metrics.csv`, `_benchmark_summary.json`, `_attribution_injections.csv` and `_evaluation_report.md`. `collect_results.py` merges them into `results/metrics.json` and regenerates the results table above from that file.
+The dashboard's Benchmark tab reads `data/processed/smap_benchmark_summary.json` and `smap_channel_metrics.csv`, which are copies of the SMAP outputs.
 
-The Streamlit dashboard's **Benchmark** tab reads `data/processed/smap_channel_metrics.csv` and `data/processed/smap_benchmark_summary.json` (the default `--output-dir`).
+## Limitations
 
-Metric functions are unit-tested:
+- **Low absolute accuracy.** Strict F1 is modest for every detector, and the autoencoder misses more events and alerts later than the baselines. It trades coverage for precision.
+- **One configuration, one seed.** The results come from a single seeded run of one small configuration (5 epochs, 60-step windows, 99th-percentile threshold), with no hyperparameter search. The tables report no variance across seeds and no confidence intervals.
+- **Point-adjusted F1 is optimistic.** Point-adjusted numbers should not be compared with papers that report only that metric without strict F1.
+- **What "root cause" means here.** Each SMAP/MSL channel has one telemetry value (column 0) plus binary command flags, so attribution ranks inputs *within* a channel, not across physical sensors. Most injected anomalies land in command columns, and attribution is much stronger for telemetry-column injections (see `results/metrics.json → attribution.by_target_column_type`).
+- **Synthetic attribution test.** Injected spikes, shifts and drifts may not resemble real faults.
+- **Benchmark labels.** SMAP/MSL labels are coarse and have known quality issues (Wu & Keogh, *Current Time Series Anomaly Detection Benchmarks are Flawed and are Creating the Illusion of Progress*, 2021). Keep that in mind when reading any score on these datasets.
+- **Dataset availability.** The official per-channel data download is currently unavailable (see *Reproduce the benchmark*). The download script's fallback mirror gives a different, non-comparable setup.
+- **Pooled ROC-AUC caveat.** Pooled ROC-AUC concatenates scores from independently scaled per-channel models and is only indicative. The table reports the per-channel mean.
+- **Demo scope.** The live demo's monitoring tabs run on a small synthetic sample (`data/raw/train.csv`), not on spacecraft data. The free hosting tier sleeps when idle.
 
-```bash
-pip install -r requirements-dev.txt
-pytest
-```
-
----
-
-## Sample Output
-
-| Timestamp | Anomaly Score | Threshold | Severity | Root Cause |
-|---|---|---|---|---|
-| 2026-01-01 00:10 | 0.87 | 0.45 | Critical | vibration |
-| 2026-01-01 00:22 | 0.51 | 0.45 | Warning | temperature |
-
----
-
-## Data Format
-
-Use any CSV with numeric sensor columns. A `label` column (0 = normal, used for training only) and `timestamp` are optional.
-timestamp,sensor_1,sensor_2,sensor_3,label
-2026-01-01 00:00:00,0.12,12.4,5.8,0
-2026-01-01 00:01:00,0.14,12.6,5.7,0
-
----
-
-## Project Structure
+## Project structure
 
 ```
-iot-sentinel/
-├── data/
-│   ├── raw/                      # place train.csv / test.csv here
-│   └── processed/                # anomaly_report.csv, benchmark JSONs
-├── models/                       # lstm_autoencoder.weights.h5, scaler.pkl, config.json
-├── src/
-│   ├── data_loader.py
-│   ├── preprocess.py
-│   ├── model.py
-│   ├── train.py
-│   ├── predict.py
-│   ├── benchmark_smap.py         # SMAP/MSL benchmark: LSTM-AE vs Isolation Forest vs first-difference
-│   ├── metrics.py                # strict / point-adjusted F1, latency, false alarms, pooling
-│   ├── baselines.py              # |x_t - x_{t-1}| baseline
-│   ├── injection.py              # synthetic anomalies + attribution hit rates
-│   ├── collect_results.py        # results/metrics.json + README results table
-│   └── download_nasa_data.py
-├── results/
-│   └── metrics.json              # all benchmark results (source of the README table)
-├── tests/                        # pytest suite for metric functions
-├── app/
-│   └── app.py                    # Streamlit dashboard entry point
-├── requirements.txt
-├── requirements-dev.txt          # + pytest
-└── README.md
+src/
+  model.py, preprocess.py, data_loader.py, train.py, predict.py, utils.py   # core pipeline
+  benchmark_smap.py      # SMAP/MSL benchmark: LSTM-AE vs Isolation Forest vs |x_t − x_{t−1}|
+  metrics.py             # strict / point-adjusted F1, latency, false alarms, pooling
+  baselines.py           # first-difference baseline
+  injection.py           # synthetic anomalies + attribution hit rates
+  collect_results.py     # builds results/metrics.json and the README results table
+  download_nasa_data.py
+app/app.py               # Streamlit dashboard
+results/metrics.json     # all benchmark results (source of the table above)
+data/processed/evaluation/   # per-dataset benchmark outputs and reports
+models/                  # trained demo model, scaler, config
+tests/                   # pytest suite
+requirements.txt         # pinned runtime dependencies
+requirements-dev.txt     # + pytest
 ```
 
----
+## License
 
-## Dashboard Tabs
-
-| Tab | Description |
-|---|---|
-| **Monitor** | Anomaly score vs threshold, highlighted anomaly windows, sensor overlays |
-| **Live Replay** | Real-time row-by-row streaming simulation from any CSV |
-| **Root Cause** | Per-anomaly sensor contribution ranking |
-| **Threshold Lab** | Compare trained, percentile, mean/std, and manual thresholds |
-| **Benchmark** | SMAP vs Isolation Forest metrics loaded from saved JSON |
-| **Report** | Downloadable anomaly CSV with severity and root-cause columns |
-
----
-
-## Accuracy Tips
-
-- Train on normal rows only — keep reliable `label=0` rows in your training CSV
-- Use window size 50–100 for SMAP/MSL-like data (default: 60)
-- Keep the saved training threshold for production inference
-- Increase percentile to reduce false positives; decrease to catch more anomalies
-- Increase smoothing for noisy sensors, but avoid over-smoothing short anomalies
-
----
-
-## Use Cases
-
-`Smart factory monitoring` · `Predictive maintenance` · `NASA-style telemetry analysis` · `IoT edge deployments` · `Anomaly detection research baseline`
-
----
-
-## Streamlit Cloud Deploy
-
-Set entry point to `app/app.py`. Train locally first and include `models/` artifacts in the deployment, or adapt the app to load hosted model artifacts.
+MIT, see [LICENSE](LICENSE).

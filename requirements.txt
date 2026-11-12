@@ -1,7 +1,10 @@
+# Exact pins for the app and the benchmark (Python 3.10, see runtime.txt).
 streamlit==1.33.0
 numpy==1.26.4
 pandas==2.2.2
 scikit-learn==1.5.2
 plotly==5.21.0
 joblib==1.4.2
-tensorflow-cpu==2.15.0
+# tensorflow-cpu has no macOS wheels; macOS gets the same TensorFlow release.
+tensorflow-cpu==2.15.0; sys_platform != "darwin"
+tensorflow==2.15.0; sys_platform == "darwin"
