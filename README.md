@@ -1,4 +1,4 @@
-# IoT Sentinel — Explainable Sensor Anomaly Detection
+# NetSentrix — Explainable Sensor Anomaly Detection
 
 ![Python](https://img.shields.io/badge/Python-3.10-3776AB?style=flat&logo=python&logoColor=white)
 ![TensorFlow](https://img.shields.io/badge/TensorFlow-2.15-FF6F00?style=flat&logo=tensorflow&logoColor=white)
@@ -161,6 +161,7 @@ src/
   baselines.py           # first-difference baseline
   injection.py           # synthetic anomalies + attribution hit rates
   collect_results.py     # builds results/metrics.json and the README results table
+  make_figures.py        # assets/tradeoff.png + assets/attribution.png from the saved results
   download_nasa_data.py  # Kaggle / zip download + SHA-256 verification
 app/app.py               # Streamlit dashboard
 results/metrics.json     # all benchmark results (source of the table above)
@@ -168,7 +169,7 @@ data/processed/evaluation/   # per-dataset benchmark outputs and reports
 models/                  # trained demo model, scaler, config
 tests/                   # pytest suite
 requirements.txt         # pinned runtime dependencies
-requirements-dev.txt     # + pytest, kaggle CLI
+requirements-dev.txt     # + pytest, kaggle CLI, matplotlib
 ```
 
 ## License
