@@ -28,7 +28,7 @@ from utils import (  # noqa: E402
 SAMPLE_DATA_PATH = ROOT / "data" / "raw" / "train.csv"
 
 st.set_page_config(
-    page_title="IoT Sentinel",
+    page_title="NetSentrix",
     page_icon=".",
     layout="wide",
 )
@@ -239,7 +239,7 @@ def make_sensor_figure(df: pd.DataFrame, feature_columns: list[str], anomaly_ind
     return fig
 
 
-st.title("IoT Sentinel")
+st.title("NetSentrix")
 st.caption("LSTM autoencoder anomaly monitoring with root-cause insight and live replay")
 
 if not model_assets_ready():

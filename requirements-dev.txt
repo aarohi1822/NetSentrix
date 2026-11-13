@@ -1,3 +1,4 @@
 -r requirements.txt
 pytest==8.3.3
 kaggle==1.7.4.5   # dataset download (src/download_nasa_data.py)
+matplotlib==3.9.2   # figures (src/make_figures.py)
