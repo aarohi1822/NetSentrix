@@ -7,7 +7,7 @@
 
 An LSTM autoencoder that flags anomalies in multivariate sensor streams from reconstruction error, reports which input drove each alert, and ships as a Streamlit dashboard. It is benchmarked on all NASA SMAP and MSL channels against Isolation Forest and a trivial baseline.
 
-**[Live demo →](https://iot-sentinel-aarohigs.streamlit.app/)** (hosted on Streamlit Community Cloud; if it has been idle, click *"Yes, get this app back up!"* and wait about a minute)
+**[Live demo →](https://netsentrix-aarohigs.streamlit.app/)** (hosted on Streamlit Community Cloud; if it has been idle, click *"Yes, get this app back up!"* and wait about a minute)
 
 ---
 
